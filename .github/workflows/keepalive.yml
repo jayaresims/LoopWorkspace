@@ -8,8 +8,16 @@ name: 5. Keepalive
 #   2. Force-pushes a one-commit "keepalive" branch, which registers real
 #      repository activity and resets the inactivity clock.
 #
-# The keepalive branch is owned entirely by this workflow. It never touches
-# main, so it cannot interfere with the Sunday sync against LoopKit upstream.
+# Design notes:
+#   - No third-party Actions are used. Every step is plain shell running the
+#     `gh` and `git` binaries that GitHub preinstalls on its own runners, so
+#     there is no external code in this workflow to trust or audit.
+#   - It uses only the automatic, per-run GITHUB_TOKEN, which GitHub issues at
+#     the start of the job, scopes to this repository, and revokes when the job
+#     ends. It never reads GH_PAT or any other secret.
+#   - The keepalive branch is owned entirely by this workflow and is replaced
+#     on every run. It never touches main, so it cannot interfere with the
+#     Sunday sync against LoopKit upstream.
 
 on:
   workflow_dispatch:
@@ -41,23 +49,19 @@ jobs:
 
       - name: Record repository activity
         env:
-          GH_PAT: ${{ secrets.GH_PAT }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          if [ -z "$GH_PAT" ]; then
-            echo "::warning::GH_PAT is not set, so no activity commit was made."
-            exit 0
-          fi
-
           STAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
           mkdir marker && cd marker
           git init -q -b keepalive
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config credential.helper '!f() { echo username=x-access-token; echo "password=${GH_TOKEN}"; }; f'
           printf 'Automated activity marker for the scheduled Loop build.\nLast run: %s\n' "$STAMP" > README.md
           git add README.md
           git commit -qm "Keepalive ${STAMP}"
           git push -q --force \
-            "https://x-access-token:${GH_PAT}@github.com/${GITHUB_REPOSITORY}.git" \
+            "https://github.com/${GITHUB_REPOSITORY}.git" \
             HEAD:refs/heads/keepalive
           echo "Pushed activity marker at ${STAMP}"
 
