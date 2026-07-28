@@ -3,7 +3,7 @@ name: 5. Keepalive
 # Keeps the scheduled "4. Build Loop" workflow alive, and raises an alarm if
 # builds go stale.
 #
-# Every Wednesday it:
+# Once a week, a few hours ahead of the Sunday build, it:
 #   1. Re-enables the build workflow (and itself) through the GitHub API,
 #      reporting whether GitHub had actually switched either one off.
 #   2. Force-pushes a one-commit "keepalive" branch, which registers real
@@ -22,6 +22,12 @@ name: 5. Keepalive
 #   - The keepalive branch is owned entirely by this workflow and is replaced
 #     on every run. It never touches main, so it cannot interfere with the
 #     Sunday sync against LoopKit upstream.
+#   - Timing matters more than frequency. "4. Build Loop" only cares whether it
+#     is enabled at Sunday 07:33 UTC, so this runs a few hours earlier the same
+#     morning. That shrinks the window in which a disable could cost a build
+#     from several days to about three hours, without running any more often.
+#     The margin is deliberately generous because GitHub can delay scheduled
+#     workflows under load.
 #   - The freshness check runs LAST on purpose. If it fails, the re-enable and
 #     activity steps have already done their work for the week.
 #   - Threshold defaults to 40 days: the scheduled build runs monthly, and
@@ -32,8 +38,8 @@ name: 5. Keepalive
 on:
   workflow_dispatch:
   schedule:
-    # Wednesdays at 06:17 UTC, deliberately away from the Sunday build.
-    - cron: "17 6 * * 3"
+    # Sundays at 04:17 UTC, about 3h15m before "4. Build Loop" at 07:33 UTC.
+    - cron: "17 4 * * 0"
 
 permissions:
   actions: write
