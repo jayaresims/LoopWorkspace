@@ -1,0 +1,67 @@
+name: 5. Keepalive
+
+# Keeps the scheduled "4. Build Loop" workflow from being switched off by
+# GitHub's 60-day repository-inactivity rule.
+#
+# It does two independent things every Wednesday:
+#   1. Calls the GitHub API to re-enable the build workflow (and itself).
+#   2. Force-pushes a one-commit "keepalive" branch, which registers real
+#      repository activity and resets the inactivity clock.
+#
+# The keepalive branch is owned entirely by this workflow. It never touches
+# main, so it cannot interfere with the Sunday sync against LoopKit upstream.
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Wednesdays at 06:17 UTC, deliberately away from the Sunday build.
+    - cron: "17 6 * * 3"
+
+permissions:
+  actions: write
+  contents: write
+
+jobs:
+  keepalive:
+    name: Keep scheduled builds alive
+    runs-on: ubuntu-latest
+    steps:
+      - name: Re-enable scheduled workflows
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for wf in build_loop.yml keepalive.yml; do
+            if gh api --silent -X PUT \
+                "repos/${GITHUB_REPOSITORY}/actions/workflows/${wf}/enable"; then
+              echo "Re-enabled ${wf}"
+            else
+              echo "::warning::Could not re-enable ${wf}. Check it manually on the Actions tab."
+            fi
+          done
+
+      - name: Record repository activity
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: |
+          if [ -z "$GH_PAT" ]; then
+            echo "::warning::GH_PAT is not set, so no activity commit was made."
+            exit 0
+          fi
+
+          STAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          mkdir marker && cd marker
+          git init -q -b keepalive
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          printf 'Automated activity marker for the scheduled Loop build.\nLast run: %s\n' "$STAMP" > README.md
+          git add README.md
+          git commit -qm "Keepalive ${STAMP}"
+          git push -q --force \
+            "https://x-access-token:${GH_PAT}@github.com/${GITHUB_REPOSITORY}.git" \
+            HEAD:refs/heads/keepalive
+          echo "Pushed activity marker at ${STAMP}"
+
+      - name: Summary
+        run: |
+          echo "### Keepalive ran" >> $GITHUB_STEP_SUMMARY
+          echo "The scheduled build workflow was re-enabled and repository activity was recorded." >> $GITHUB_STEP_SUMMARY
