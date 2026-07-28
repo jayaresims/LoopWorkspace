@@ -1,12 +1,16 @@
 name: 5. Keepalive
 
-# Keeps the scheduled "4. Build Loop" workflow from being switched off by
-# GitHub's 60-day repository-inactivity rule.
+# Keeps the scheduled "4. Build Loop" workflow alive, and raises an alarm if
+# builds go stale.
 #
-# It does two independent things every Wednesday:
-#   1. Calls the GitHub API to re-enable the build workflow (and itself).
+# Every Wednesday it:
+#   1. Re-enables the build workflow (and itself) through the GitHub API,
+#      reporting whether GitHub had actually switched either one off.
 #   2. Force-pushes a one-commit "keepalive" branch, which registers real
-#      repository activity and resets the inactivity clock.
+#      repository activity and resets GitHub's 60-day inactivity clock.
+#   3. Checks how long ago "4. Build Loop" last succeeded and FAILS this job
+#      if that is older than MAX_BUILD_AGE_DAYS. A failing job emails you,
+#      which turns a silently-missed monthly build into a visible alarm.
 #
 # Design notes:
 #   - No third-party Actions are used. Every step is plain shell running the
@@ -18,6 +22,12 @@ name: 5. Keepalive
 #   - The keepalive branch is owned entirely by this workflow and is replaced
 #     on every run. It never touches main, so it cannot interfere with the
 #     Sunday sync against LoopKit upstream.
+#   - The freshness check runs LAST on purpose. If it fails, the re-enable and
+#     activity steps have already done their work for the week.
+#   - Threshold defaults to 40 days: the scheduled build runs monthly, and
+#     TestFlight builds expire at 90, so 40 flags a missed build while leaving
+#     roughly seven weeks to fix it. Override by creating a repository
+#     variable named MAX_BUILD_AGE_DAYS.
 
 on:
   workflow_dispatch:
@@ -39,9 +49,17 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           for wf in build_loop.yml keepalive.yml; do
+            state=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/${wf}" \
+                      --jq '.state' 2>/dev/null || echo "unknown")
+
             if gh api --silent -X PUT \
                 "repos/${GITHUB_REPOSITORY}/actions/workflows/${wf}/enable"; then
-              echo "Re-enabled ${wf}"
+              if [ "$state" = "active" ]; then
+                echo "${wf}: already active, enable call refreshed it"
+              else
+                echo "::warning::${wf} was in state '${state}' and has been re-enabled."
+                echo "- \`${wf}\` had been switched off (state \`${state}\`) and was re-enabled." >> "$GITHUB_STEP_SUMMARY"
+              fi
             else
               echo "::warning::Could not re-enable ${wf}. Check it manually on the Actions tab."
             fi
@@ -65,7 +83,32 @@ jobs:
             HEAD:refs/heads/keepalive
           echo "Pushed activity marker at ${STAMP}"
 
-      - name: Summary
+      - name: Check build freshness
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MAX_AGE_DAYS: ${{ vars.MAX_BUILD_AGE_DAYS || '40' }}
         run: |
-          echo "### Keepalive ran" >> $GITHUB_STEP_SUMMARY
-          echo "The scheduled build workflow was re-enabled and repository activity was recorded." >> $GITHUB_STEP_SUMMARY
+          LAST=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/build_loop.yml/runs?status=success&per_page=1" \
+            --jq '.workflow_runs[0].created_at // empty')
+
+          if [ -z "$LAST" ]; then
+            echo "::error::No successful '4. Build Loop' run found at all. Open the Actions tab and investigate."
+            echo "### :rotating_light: No successful build on record" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          AGE_DAYS=$(( ( $(date -u +%s) - $(date -u -d "$LAST" +%s) ) / 86400 ))
+          echo "Last successful build: ${LAST} (${AGE_DAYS} days ago). Threshold: ${MAX_AGE_DAYS} days."
+
+          if [ "$AGE_DAYS" -gt "$MAX_AGE_DAYS" ]; then
+            echo "### :rotating_light: Loop builds have gone stale" >> "$GITHUB_STEP_SUMMARY"
+            echo "Last successful build was **${AGE_DAYS} days ago** (${LAST}), past the ${MAX_AGE_DAYS}-day threshold." >> "$GITHUB_STEP_SUMMARY"
+            echo "TestFlight builds expire 90 days after upload. Check '4. Build Loop' for failures, and check that the Apple Developer Program agreements are signed." >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::Last successful Loop build was ${AGE_DAYS} days ago, past the ${MAX_AGE_DAYS}-day threshold. TestFlight expires at 90 days, so investigate now."
+            exit 1
+          fi
+
+          echo "### :white_check_mark: Keepalive ran" >> "$GITHUB_STEP_SUMMARY"
+          echo "Scheduled workflows re-enabled, repository activity recorded." >> "$GITHUB_STEP_SUMMARY"
+          echo "Last successful build was ${AGE_DAYS} day(s) ago, within the ${MAX_AGE_DAYS}-day threshold." >> "$GITHUB_STEP_SUMMARY"
